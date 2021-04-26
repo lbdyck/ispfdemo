@@ -1,0 +1,764 @@
+  /* --------------------  rexx procedure  -------------------- *
+  | Name:      ISPFDEMO                                        |
+  |                                                            |
+  | Function:  ISPFDEMO                                        |
+  |                                                            |
+  | Syntax:    %ISPFDEMO demo-data-set                         |
+  |     or:    ISPFDEMO (as an edit macro)                     |
+  |                                                            |
+  | Usage Notes: The format of the demo-data-set is:           |
+  |                                                            |
+  | All records prior to >START are ignored (comments)         |
+  |                                                            |
+  | Attribute characters that may be used in the text are:     |
+  | + normal text                                              |
+  | % highlight text                                           |
+  | $ input variable                                           |
+  | @ output variable                                          |
+  | ~ reverse text                                             |
+  | [ yellow text                                              |
+  | ] red text                                                 |
+  | ! blue text                                                |
+  | } may NOT be used as it is used for the scrollable panel   |
+  |   area                                                     |
+  |                                                            |
+  | The 1st record to indicate all the following are key       |
+  | >START                                                     |
+  |                                                            |
+  | >PANEL table-name                                          |
+  |  table-name is optional, indicating a table name and thus  |
+  |             a table display (tbdispl) will be used         |
+  |  Command ===>_zcmd is inserted automatically               |
+  |                                                            |
+  | >PPANEL                                                    |
+  |  - a popup panel                                           |
+  |  - Width and Depth are calculated                          |
+  |  - No Command ===> field                                   |
+  |  - The Addpop Location (row/col) will be calculated)       |
+  |                                                            |
+  | >SPANEL                                                    |
+  |  - a scrollable panel (non-table)                          |
+  |  - otherwise same as >PANEL                                |
+  |  Command ===>_zcmd is inserted automatically               |
+  |  as is a Scroll field.                                     |
+  |                                                            |
+  | >TPanel                                                    |
+  |  - a TSO panel with no meaningful attributes to show       |
+  |    a pseudo TSO screen                                     |
+  |  - Only data records allowed                               |
+  |                                                            |
+  | >T title-text                                              |
+  |  a title text for the ISPF Panel                           |
+  |  - should come immediately after the panel record          |
+  |                                                            |
+  | >V variable value                                          |
+  |  - defines the variable in the )INIT section               |
+  |  - may be placed anywhere                                  |
+  |                                                            |
+  | >SF variable-name length                                   |
+  |  Scrolling field                                           |
+  |  - the scrolling indicator variable is SFT# (1 to n)       |
+  |    with # incrementing for each field. Must be defined     |
+  |    with the @ output attribute                             |
+  |                                                            |
+  | >C comment                                                 |
+  |  may be anywhere                                           |
+  |                                                            |
+  | >M short / long-message                                    |
+  |  may be anywhere but will be inserted into )PROC           |
+  |  and invoked on 1st enter, then ignored.                   |
+  |  - use F1 to view the long message                         |
+  |                                                            |
+  | >TT table model header                                     |
+  |  defines the header for a table display                    |
+  |  - may have multiple if each table row is multiple rows    |
+  | >TL                                                        |
+  |  defines the length of each table column                   |
+  |  - may have multiple if each table row is multiple rows    |
+  |  - each >TL must match a >TT so they go in pairs for > 1   |
+  | >TR                                                        |
+  |  defines the variables and placement for the table         |
+  |  - ALL variables are v for sel and v1 thru v9              |
+  |  - on 1st use the )MODEL statement will be written         |
+  |                                                            |
+  | For a table the $ is used for the 1st variable and @ for   |
+  | all others.                                                |
+  |                                                            |
+  | >TABLE table-name                                          |
+  |  defines a table and the name to call it                   |
+  |  below it are the table rows, separated by blanks          |
+  |                                                            |
+  |  if a variable value is . then it will be blank in the     |
+  |  table                                                     |
+  |                                                            |
+  | >END                                                       |
+  |  defines the end of the control records                    |
+  |                                                            |
+  | Enter command B to back one panel (skipping Popups)        |
+  | Enter Enter to go forward                                  |
+  | Enter F3 to terminate immediately                          |
+  |                                                            |
+  | Author:    Lionel B. Dyck                                  |
+  |                                                            |
+  | History:  (most recent on top)                             |
+  |            10/10/19 LBD - Use randeom DD name for libdef   |
+  |            10/03/19 LBD - Clean up do variable from i      |
+  |            09/25/19 LBD - Set &ZSCR to CSR for scroll      |
+  |            09/16/19 LBD - Support multi-row tables         |
+  |            09/12/19 LBD - Calculate the best AddPop loc    |
+  |                         - Turn PFSHOW Off at start and     |
+  |                           back On at exit (if On)          |
+  |                         - Add >TPANEL (TSO)                |
+  |            09/10/19 LBD - Calculate the PopUp window       |
+  |            09/08/19 LBD - Finally correct B usage          |
+  |            09/05/19 LBD - Add >M for messagess             |
+  |                         - Correct B for popups             |
+  |                         - Add ~ attribute                  |
+  |                         - Add >SF scrolling field          |
+  |            09/03/19 LBD - Change >C to >V                  |
+  |                         - Add >C as comment                |
+  |                         - Add >PPANEL (popup)              |
+  |            08/30/19 LBD - add >C value                     |
+  |            08/29/19 LBD - Increase scroll area by 1        |
+  |            08/20/19 LBD - Correct if no >END               |
+  |            08/07/19 LBD - Lots of cleanup                  |
+  |            08/06/19 LBD - Creation                         |
+  |                                                            |
+  * ---------------------------------------------------------- */
+  Address ISREdit
+  'Macro NOPROCESS (options)'
+  mrc = rc
+
+  /* --------------------------------- *
+  | Capture errors so we can clean up |
+  * --------------------------------- */
+  Signal on Error
+  Signal on Halt
+  Signal on Failure
+
+  /* ---------------------------------------- *
+  | Determine if we are an edit macro or not |
+  | based on the RC from the Macro statement |
+  * ---------------------------------------- */
+  emac = 0
+  if mrc > 0 then arg demotext options
+  else do
+    emac = 1
+  end
+
+  /* ------------------------- *
+  | Capture start timing info |
+  * ------------------------- */
+  s_service = sysvar('SYSSRV')
+  s_time    = sysvar('SYSCPU')
+
+  /* --------------------- *
+  | Setup our environment |
+  * --------------------- */
+  Address TSO
+  call setup
+
+  /* ----------------------- *
+  | Capture any ISPF issues |
+  * ----------------------- */
+  Address ISPExec
+  'Control Errors Return'
+
+  /* -------------------------- *
+  | Check if PFShow is enabled |
+  * -------------------------- */
+  'vget (zpfshow)'
+  pfkeys = zpfshow
+  if pfkeys = 'ON' then
+  'select pgm(ispopf) parm(FKA,OFF)'
+
+  /* ------------------------------------------------- *
+  | Process all the Input records to build the panels |
+  * ------------------------------------------------- */
+  call process_input
+
+  /* --------------------------------------------------- *
+  | if the options passed are not null report init time |
+  * --------------------------------------------------- */
+  if options /= null then do
+    e_service = sysvar('SYSSRV')
+    e_time    = sysvar('SYSCPU')
+    total_service = e_service - s_service
+    total_time    = e_time    - s_time
+    zedsmsg = null
+    zedlmsg = left('Total initialization time:',76) ,
+      left('Service Units:' total_service,76) ,
+      'CPU Time:' total_time
+    'setmsg msg(isrz001)'
+  end
+
+  /* -------------------------------------------- *
+  | Now do the real work and display the panels. |
+  * -------------------------------------------- */
+  call do_demo
+
+  /* ------------------------------------------- *
+  | Close out all open tables and remove LibDef |
+  * ------------------------------------------- */
+All_Done:
+  do i_table = 1 to words(tables)
+    'tbend' word(tables,i_table)
+  end
+
+  if pfkeys = 'ON' then
+  'select pgm(ispopf) parm(FKA,ON)'
+
+  'Libdef ISPPLIB'
+  Address TSO
+  call outtrap 'x.'
+  'delete' "'"demods"'"
+  call outtrap 'off'
+  Exit
+
+  /* ---------------------------------------------------- *
+  | Display all the panels in the order they were found. |
+  * ---------------------------------------------------- */
+Do_Demo:
+  "Libdef ISPPLIB Dataset ID('"demods"') Stack"
+
+  /* ----------------------------------- *
+  | Make sure all tables are at the top |
+  * ----------------------------------- */
+  do i_table = 1 to words(tables)
+    tab = word(tables,i_table)
+    'tbtop' tab
+  end
+
+  /* --------------------------- *
+  | Now process thru all panels |
+  * --------------------------- */
+  do i_p = 1 to words(panels)
+    panel = word(panels,i_p)
+    pop = 0
+    table = null
+    zcmd = null
+
+    /* ----------------------------------- *
+    | Panel names with \ are popup panels |
+    * ----------------------------------- */
+    if pos('\',panel) > 0 then do
+      pop = 1
+      parse value panel with panel'\'
+    end
+
+    /* ------------------------------------ *
+    | panel names with / have a table name |
+    * ------------------------------------ */
+    if pos('/',panel) > 0 then
+    parse value panel with panel'/'table
+    'Control Errors Return'
+    if pop = 1 then do
+      poploc = wordpos(panel,pops)
+      poploc = subword(pops,poploc+1)
+      parse value poploc with row','col .
+      'Addpop Row('row') Column('col')'
+    end
+    signal off error
+    if table = null
+    then 'Display Panel('panel')'
+    else 'TBDispl' table 'Panel('panel')'
+    drc = rc
+    signal on error
+    if pop = 1 then 'Rempop'
+    if drc = 8 then leave
+    if drc > 8 then if zerrsm /= null then do
+       zerrlm = panel zerrlm
+       'Setmsg msg(isrz002)'
+       end
+
+    /* ------------------------------ *
+    | Process the Backup (B) command |
+    | and skip popup panels          |
+    * ------------------------------ */
+    if translate(left(zcmd,1)) = 'B' then do
+      i_p = i_p - 1
+      if i_p > 0 then do
+        if pos('\',word(panels,i_p)) > 0 then i_p = i_p - 2
+        else i_p = i_p - 1
+      end
+      if i_p < 0 then i_p = 0
+    end
+  end
+  return
+
+  /* ---------------------------------------------- *
+  | Process the input data per the specifications. |
+  * ---------------------------------------------- */
+Process_Input:
+  /* ---------------------------------- *
+  | Ignore all records prior to >START |
+  * ---------------------------------- */
+  do i_data = 1 to data.0
+    data = data.i_data
+    if translate(word(data,1)) = '>START' then leave
+  end
+
+  /* ------------------------------ *
+  | Start with the actual data now |
+  * ------------------------------ */
+  ic = i_data + 1
+  type = null
+  ptitle = null
+  vt = 0
+  pop = 0
+  do i_data = ic to data.0
+    data = data.i_data
+    /* ---------------------------- *
+    | Ignore comment records (>C) ||
+    * ---------------------------- */
+    if translate(left(data,3)) = '>C ' then iterate
+    /* ------------------------------- *
+    | Process the Message (>M) record |
+    * ------------------------------- */
+    if translate(left(data,3)) = '>M ' then do
+      parse value substr(data,4) with smsg'/'lmsg
+      lmsg = strip(lmsg)
+      iterate
+    end
+    /* ---------------------------------- *
+    | Collect Scrolling Field (>SF) info |
+    * ---------------------------------- */
+    if translate(word(data,1)) = '>SF ' then do
+      call do_sfield substr(data,5)
+      iterate
+    end
+    /* --------------------------------------------- *
+    | Process the Scrollable Panel (>SPANEL) record |
+    * --------------------------------------------- */
+    if translate(word(data,1)) = '>SPANEL' then do
+      if type = 'P' then call write_pan
+      type = 'P'
+      ptype = 'S'
+      pid = pid + 1
+      pname = 'P'right(pid+1000,3)
+      call do_attr
+      pc = pc + 1
+      p.pc = ' } area(SCRL) Extend(ON)'
+      pc = pc + 1
+      p.pc = ')Body'
+      panels = panels pname'/'
+    end
+    /* --------------------------------------------- *
+    | Process the Scrollable Panel (>TPANEL) record |
+    * --------------------------------------------- */
+    if translate(word(data,1)) = '>TPANEL' then do
+      if type = 'P' then call write_pan
+      type = 'P'
+      ptype = 'T'
+      pid = pid + 1
+      pname = 'P'right(pid+1000,3)
+      call do_attr
+      pc = pc + 1
+      p.pc = ')Body'
+      panels = panels pname
+    end
+    /* ---------------------------------------- *
+    | Process the PopUp Panel (>PPANEL) record |
+    * ---------------------------------------- */
+    if translate(word(data,1)) = '>PPANEL' then do
+      if type = 'P' then call write_pan
+      type    = 'P'
+      ptype   = 'P'
+      pid     = pid + 1
+      pname   = 'P'right(pid+1000,3)'\'
+      call do_attr
+      pc     = pc + 1
+      p.pc   = ')Body'
+      pbody  = pc
+      panels = panels pname
+    end
+    /* ---------------------------------------- *
+    | Process the Normal Panel (>PANEL) record |
+    * ---------------------------------------- */
+    if translate(word(data,1)) = '>PANEL' then do
+      if type = 'P' then call write_pan
+      parse value data with . ptable .
+      type = 'P'
+      ptype = 'N'
+      cdata = null
+      pid = pid + 1
+      pname = 'P'right(pid+1000,3)
+      call do_attr
+      pc = pc + 1
+      p.pc = ')Body'
+      panels = panels pname'/'ptable
+    end
+    /* --------------------------------- *
+    | Process the Table (>TABLE) record |
+    * --------------------------------- */
+    if translate(word(data,1)) = '>TABLE' then do
+      if type = 'P' then call write_pan
+      parse value data with . table
+      type = 'T'
+      tables = tables table
+      'tbcreate' table 'names(v v1 v2 v3 v4 v5 v6 v7 v8 v9) nowrite'
+    end
+    /* ------------------------------------- *
+    | Process the End of Data (>END) record |
+    * ------------------------------------- */
+    if translate(word(data,1)) = '>END' then do
+      if type = 'T' then 'tbtop' table
+      if type = 'P' then call write_pan
+      type = null
+      leave
+    end
+
+    /* ------------------------- *
+    | Process all other records |
+    * ------------------------- */
+    /* ----------------------------------------------- *
+    | If type T active then build a table row (tbadd) |
+    * ----------------------------------------------- */
+    if type = 'T' then
+    if left(data,1) /= '>' then do
+      parse value data with v v1 v2 v3 v4 v5 v6 v7 v8 v9
+      if v  = '.' then v  = null
+      if v1 = '.' then v1 = null
+      if v2 = '.' then v2 = null
+      if v3 = '.' then v3 = null
+      if v4 = '.' then v4 = null
+      if v5 = '.' then v5 = null
+      if v6 = '.' then v6 = null
+      if v7 = '.' then v7 = null
+      if v8 = '.' then v8 = null
+      if v9 = '.' then v9 = null
+      'tbadd' table
+    end
+
+    /* ---------------------------------------- *
+    | Process records if type P (Panel) active |
+    * ---------------------------------------- */
+    if type = 'P' then do
+      /* ------------------------------------ *
+      | Process the Variable (>V) set record |
+      * ------------------------------------ */
+      if translate(left(data,3)) = '>V ' then do
+        parse value substr(data,4) with var value
+        vt = vt + 1
+        vdata.vt = var value
+      end
+      /* ----------------------------- *
+      | Process the Title (>T) record |
+      * ----------------------------- */
+      if translate(left(data,3)) = '>T ' then do
+        wdata = strip(substr(data,3))
+        if ptype = 'P' then do
+          ptitle = "'"wdata"'"
+          iterate
+        end
+        /* --------------------------------------------------------- *
+        | Insert Command and Scrolling records if not ptype T (TSO) |
+        * --------------------------------------------------------- */
+        pc = pc + 1
+        p.pc = '%'center(' 'wdata' ',78,'-')
+        pc = pc + 1
+        /* ------------------------- *
+        | Insert the Command record |
+        * ------------------------- */
+        p.pc = '+Command ===>_zcmd'
+        if ptable = null then do
+          pl = length(strip(p.pc))
+          p.pc = left(p.pc,79-1)'+'
+          if ptype = 'S' then do
+            p.pc = '+Command ===>_zcmd'
+            pl = length(strip(p.pc))
+            sc = '+Scroll ===>$zscr+'
+            sl = length(sc)
+            p.pc = left(p.pc,80-pl-1)' 'sc
+          end
+        end
+        else do   /* table scrolling */
+          pl = length(strip(p.pc))
+          sc = '+Scroll ===>$zscr+'
+          sl = length(sc)
+          p.pc = left(p.pc,80-pl-1)' 'sc
+        end
+        /* ----------------------------------- *
+        | Insert Scrolling Panel Area records |
+        * ----------------------------------- */
+        if ptype = 'S' then do
+          pc = pc + 1
+          p.pc = left('}area ',79,' ')'}'
+          pc = pc + 1
+          p.pc = ')Area area'
+        end
+      end
+      /* ---------------------------------------- *
+      | Process the Table variable length record |
+      * ---------------------------------------- */
+      if translate(left(data,3)) = '>TL' then do
+        rowl = substr(data,4)
+      end
+      /* ---------------------------------- *
+      | Process the Table Title row record |
+      * ---------------------------------- */
+      if translate(left(data,3)) = '>TT' then do
+        pc = pc + 1
+        p.pc = '+'substr(data,4)
+        model = null
+      end
+      /* ------------------------------------- *
+      | Process the Table Row location record |
+      * ------------------------------------- */
+      if translate(left(data,3)) = '>TR' then do
+        if model = null then do
+          pc = pc + 1
+          p.pc = ')Model '
+          model = 1
+        end
+        pc = pc + 1
+        wdata= substr(data,4)
+        ov = '$'
+        do iw = 1 to words(wdata)
+          ww = word(wdata,iw)
+          if length(ww) > 1 then ov = '@'
+          pw = pos(ww,wdata)
+          wdata = overlay(ov''ww,wdata,pw)
+          ov = '@'
+        end
+        ov = '$'
+        do iw = words(wdata) to 1 by -1
+          ww = word(wdata,iw)
+          pw = pos(ww,wdata)
+          wl = word(rowl,iw)
+          cwl = length(ww)
+          if wl < cwl then wl = cwl
+          wdata = overlay('+',wdata,pw+wl)
+          ov = '@'
+        end
+        p.pc = ' 'wdata
+      end
+      /* ----------------------------------------- *
+      | Process actual text records for the Panel |
+      * ----------------------------------------- */
+      if left(data,1) /= '>' then do
+        pc = pc + 1
+        if ptype /= 'T' then do
+          if pos(left(data,1),'+$%@}') > 0
+          then p.pc = data
+          else p.pc = '+'data
+        end
+        else p.pc = strip(data,'T')' '
+      end
+    end
+  end
+  /* ---------------------------------------------------------- *
+  | All records processed so if a Panel was being generated at |
+  | this point write it out.                                   |
+  * ---------------------------------------------------------- */
+  if type = 'P' then call write_pan
+  return
+
+  /* --------------------------- *
+  | Process Scrolling Field tag |
+  * --------------------------- */
+Do_SField:
+  arg field length
+  sfc = sfc + 1
+  sfield.sfc = field length
+  return
+
+  /* -------------------- *
+  | Define )Attr section |
+  * -------------------- */
+Do_Attr:
+  drop p.
+  if ptype /= 'T' then do
+    p.1 = ')Attr'
+    p.2 = ' $ type(input) hilite(uscore) caps(off)'
+    p.3 = ' @ type(output) caps(off)'
+    p.4 = ' ~ type(text) caps(off) hilite(reverse)'
+    p.5 = ' [ type(text) caps(off) color(yellow) intens(high)'
+    p.6 = ' ] type(text) caps(off) color(red)    intens(high)'
+    p.7 = ' ! type(text) caps(off) color(blue) intens(high)'
+    p.8 = ' _ type(input) hilite(uscore) caps(off) intens(high)'
+    pc = 8
+  end
+  else do
+    p.1 = ')Attr Default(~`!)'
+    p.2 = ' ` type(text) caps(off) intens(high)'
+    pc = 2
+  end
+  return
+
+  /* ----------------------------------- *
+  | Setup the environment for the demo. |
+  * ----------------------------------- */
+Setup:
+  /* ------------------- *
+  | Define our defaults |
+  * ------------------- */
+  parse value '' with null panels tables hit smsg lmsg pops
+  pid = 0
+  sfc = 0
+  zerrhm   = null
+  zerralrm = 'NO'
+  dd = 'DD'time('s')
+
+  /* --------------------------------------------- *
+  | define the work data set used for ISPF Panels |
+  * --------------------------------------------- */
+  if sysvar('syspref') = null
+  then pref = sysvar('sysuid')
+  else pref = sysvar('syspref')
+  tsuf = left(time(),2)''substr(time(),4,2)''right(time(),2)
+  dsuf = substr(date('s'),3)
+  demods = pref'.demods.d'dsuf'.T'tsuf
+
+  /* ------------------------------- *
+  | Delete the temp panels data set |
+  * ------------------------------- */
+  if sysdsn("'"demods"'") = 'OK' then do
+    call outtrap 'x.'
+    'delete' "'"demods"'"
+    call outtrap 'off'
+  end
+
+  /* -------------------------------------- *
+  | Allocate the temporary panels data set |
+  * -------------------------------------- */
+  "Alloc f("dd") ds('"demods"') new spa(30,30) dir(12) dsorg(po)" ,
+    'recfm(f b) lrecl(80)'
+  'Free f('dd')'
+
+  /* --------------------------------- *
+  | If not an edit macro then do this |
+  * --------------------------------- */
+  if emac = 0 then do
+    /* ---------------------------------- *
+    | Allocate and read in the demo text |
+    * ---------------------------------- */
+    'Alloc f('dd') ds('demotext') shr reuse'
+    'Execio * diskr' dd '(finis stem data.'
+    'Free f('dd')'
+  end
+  /* ------------------------------ *
+  | If an edit macro then do this: |
+  * ------------------------------ */
+  else do
+    Address ISREdit
+    "(last) = LINENUM .ZLAST"
+    do i_data = 1 to last
+      '(data) = line' i_data
+      data.i_data = data
+      data.0 = i_data
+    end
+  end
+  return
+
+  /* ------------------- *
+  | Write out the panel |
+  * ------------------- */
+write_pan:
+  if ptype = 'P' then do
+    panw = 0
+    panc = 0
+    phit = 0
+    do i_p = 1 to pc
+      if translate(left(p.i_p,5)) = ')BODY' then phit = 1
+      if phit = 0 then iterate
+      if translate(left(p.i_p,5)) = ')INIT' then phit = 0
+      if left(p.i_p,1) = '>' then iterate
+      if left(p.i_p,1) = ')' then iterate
+      panc = panc + 1
+      pancl = length(strip(p.i_p))
+      if pancl > panw then panw = pancl
+    end
+    p.pbody = ')Body window('panw','panc')'
+    col = ((76 - panw) % 2) -2
+    row = ((20 - panc) % 4) - 1
+    pops = pops left(pname,4)' 'row','col
+  end
+  pc = pc + 1
+  p.pc = ')Init'
+  if pos(ptype,'PT') = 0 then do
+    pc = pc + 1
+    p.pc = ' .CURSOR = ZCMD'
+  end
+  if ptype = 'S' then do
+     pc = pc + 1
+     p.pc = '&zscr = CSR'
+     end
+  if smsg /= null then do
+    pc = pc + 1
+    p.pc = ' &msghit = 0'
+  end
+  if vt > 0 then do vti = 1 to vt
+    pc = pc + 1
+    parse value vdata.vti with var val
+    p.pc = ' &'var '=' "'"strip(val)"'"
+  end
+  if ptitle /= null then do
+    pc = pc + 1
+    p.pc = ' &zwinttl = ' ptitle
+    ptitle = null
+  end
+  pc = pc + 1
+  p.pc = ')Proc'
+  if smsg /= null then do
+    pc = pc + 1
+    p.pc = '*Rexx(* msghit)'
+    pc = pc + 1
+    p.pc = '  msghit = msghit + 1'
+    pc = pc + 1
+    p.pc = '*Endrexx'
+    pc = pc + 1
+    p.pc = '  IF (&MSGHIT EQ 1)'
+    pc = pc + 1
+    /* Comment Start
+    p.pc = "     &ZEDSMSG = '"smsg"'"
+    pc = pc + 1
+       Comment End */
+    p.pc = "     &ZEDLMSG = '"lmsg"'"
+    pc = pc + 1
+    p.pc = '     .MSG = ISRZ001'
+    parse value '' with smsg lmsg
+  end
+  if sfc > 0 then do
+    pc = pc + 1
+    p.pc = ')Field'
+    do sf = 1 to sfc
+      pc = pc + 1
+      sft = ' Field('word(sfield.sfc,1)') len('word(sfield.sfc,2)')'
+      p.pc = sft "ind(sft"sf",'<>')"
+    end
+  end
+  pc = pc + 1
+  p.pc = ')End'
+  p.0 = pc
+  if pos('\',pname) > 0 then
+  parse value pname with pname'\'
+  pands = "'"demods"("pname")'"
+  Address TSO
+  'Alloc f('dd') shr ds('pands')'
+  Signal Off Error
+  'Execio * diskw' dd '(finis stem p.'
+  Signal On Error
+  'Free  f('dd')'
+  Address ISPExec
+  vt = 0
+  pop = 0
+  sfc = 0
+  drop vdata. sfield.
+  return
+
+  /* ----------------------- *
+  | Error Handling Routines |
+  * ----------------------- */
+Error:
+  Say 'Error:' sigl":"sourceline(sigl)
+  Address ISPExec
+  call all_done
+Halt:
+  Say 'Halt:' sigl':'sourceline(sigl)
+  Address ISPExec
+  call all_done
+Failure:
+  Say 'Failure:' sigl':'sourceline(sigl)
+  Address ISPExec
+  call all_done
